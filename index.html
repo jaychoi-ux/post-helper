@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="gph-helper" content="1">
 <title>Group Post Helper</title>
 <style>
 :root{--bg:#f4f2ee;--card:#fff;--ink:#1d2430;--mute:#69717d;--line:#dcd8d0;--accent:#0b5cad;--ok:#1e7a4a;--okbg:#e4f3ea}
@@ -69,7 +70,7 @@ summary{cursor:pointer;color:var(--accent);font-size:14px}
 
 <section>
   <div class="bar"><h2 style="margin:0">Groups</h2><span id="count" class="hint" style="margin:0"></span></div>
-  <div class="queue"><p class="info" id="qinfo"></p><div class="row"><button class="primary" id="qnext">Start queue</button><button id="qskip" hidden>Skip this group</button></div></div>
+  <div class="queue"><p class="info" id="qinfo"></p><div class="row"><button class="primary" id="qnext">Start queue</button><button id="qskip" hidden>Skip this group</button></div><p class="hint" id="bridge"></p></div>
   <div id="list"></div>
 
   <details id="add">
@@ -85,8 +86,6 @@ summary{cursor:pointer;color:var(--accent);font-size:14px}
     <div class="row" style="margin-top:10px">
       <button id="exp">Export backup</button>
       <button id="imp">Import backup</button>
-      <button id="expcsv">Export links (CSV)</button>
-      <button id="cplinks">Copy all links</button>
       <input type="file" id="file" accept=".json" hidden>
     </div>
     <p class="hint">Backups include text and groups, not images or videos.</p>
@@ -125,6 +124,37 @@ function renderMedia(){
     return '<div class="m">'+thumb+'<div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div><div class="row">'+act+'<button class="ghost" data-a="rm" data-i="'+i+'">Remove</button></div></div>';
   }).join("");
 }
+var bridge=false;
+var HINT_MANUAL=$("mhint").textContent;
+var HINT_AUTO="Images are added to the post for you. Videos still need Photo/video in the Facebook post box. Media is kept only until you close or reload this page.";
+function renderBridge(){
+  $("bridge").textContent=bridge?"Auto-fill is on: text and images fill in by themselves. You check the post and click Post.":"Auto-fill is off. Install the auto-fill userscript to skip pasting.";
+  $("mhint").textContent=bridge?HINT_AUTO:HINT_MANUAL;
+}
+window.addEventListener("message",function(e){
+  var d=e.data;if(!d||d.gph!=="hello"||bridge)return;
+  bridge=true;renderBridge();
+});
+window.postMessage({gph:"ping"},"*");
+function sendJob(g){
+  if(!bridge)return;
+  var imgs=media.filter(function(m){return m.data;}).map(function(m){return {name:m.fname,data:m.data};});
+  var vids=media.filter(function(m){return m.type.indexOf("video")===0;}).length;
+  window.postMessage({gph:"job",job:{text:messageFor(g),images:imgs,videos:vids,url:g.url,name:g.name,ts:Date.now()}},"*");
+}
+function openGroup(g){
+  copy(messageFor(g));sendJob(g);window.open(g.url,"_blank");
+  if(bridge)toast("Opening "+g.name+". The post fills in by itself. Check it, then click Post.");
+  else toast(media.length?"Text copied. Paste it, then come back to copy the image.":"Text copied. Paste it in the group.");
+}
+function imageData(f,url){
+  if(f.type==="image/gif")return new Promise(function(res,rej){var r=new FileReader();r.onload=function(){res(r.result);};r.onerror=rej;r.readAsDataURL(f);});
+  return new Promise(function(res,rej){var im=new Image();im.onload=function(){
+    var k=Math.min(1,2048/Math.max(im.naturalWidth,im.naturalHeight));
+    var c=document.createElement("canvas");c.width=Math.round(im.naturalWidth*k);c.height=Math.round(im.naturalHeight*k);
+    var x=c.getContext("2d");x.fillStyle="#fff";x.fillRect(0,0,c.width,c.height);x.drawImage(im,0,0,c.width,c.height);
+    res(c.toDataURL("image/jpeg",0.9));};im.onerror=rej;im.src=url;});
+}
 var current=null,skipped=[];
 function pending(){var t=today();return state.groups.filter(function(g){return g.last!==t&&skipped.indexOf(g)<0&&g!==current;});}
 function renderQueue(){
@@ -136,8 +166,7 @@ function renderQueue(){
 function advance(){
   var p=pending();
   if(!p.length){current=null;toast("Queue finished.");renderQueue();render();return;}
-  var g=p[0];copy(messageFor(g));window.open(g.url,"_blank");current=g;
-  toast(media.length?"Text copied. Paste it, then copy the image here.":"Text copied. Paste it in the group.");
+  var g=p[0];current=g;openGroup(g);
   renderQueue();render();
 }
 $("qnext").addEventListener("click",function(){
@@ -168,7 +197,13 @@ $("text").value=state.text;
 $("text").addEventListener("input",function(){state.text=this.value;save();});
 $("madd").addEventListener("click",function(){$("mfile").click();});
 $("mfile").addEventListener("change",function(){
-  Array.prototype.forEach.call(this.files,function(f){media.push({name:f.name,type:f.type||"",url:URL.createObjectURL(f)});});
+  Array.prototype.forEach.call(this.files,function(f){
+    var m={name:f.name,type:f.type||"",url:URL.createObjectURL(f)};media.push(m);
+    if(m.type.indexOf("image")===0){
+      m.fname=f.type==="image/gif"?f.name:f.name.replace(/\.[^.]+$/,"")+".jpg";
+      imageData(f,m.url).then(function(d){m.data=d;}).catch(function(){toast("Couldn't prepare "+f.name+". Add it with Photo/video instead.");});
+    }
+  });
   this.value="";renderMedia();
 });
 $("media").addEventListener("click",function(e){
@@ -182,8 +217,7 @@ $("list").addEventListener("click",function(e){
   if(a==="go"){
     var msg=messageFor(g);
     if(!msg.trim()){toast("Write your post text first.");return;}
-    copy(msg);window.open(g.url,"_blank");
-    toast(media.length?"Text copied. Paste it, then come back to copy the image.":"Text copied. Paste it in the group.");
+    openGroup(g);
   }else if(a==="done"){g.last=(g.last===today())?"":today();save();render();}
   else if(a==="custom"){
     var v=prompt("Write a text just for \""+g.name+"\" (leave empty to use the main text):",g.custom||"");
@@ -200,24 +234,13 @@ $("exp").addEventListener("click",function(){
   var a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(state,null,2)],{type:"application/json"}));
   a.download="group-post-helper-backup.json";a.click();
 });
-$("expcsv").addEventListener("click",function(){
-  if(!state.groups.length){toast("No groups to export yet.");return;}
-  function q(v){return '"'+String(v||"").replace(/"/g,'""')+'"';}
-  var rows=["Name,Link,Note,Last posted"].concat(state.groups.map(function(g){return [q(g.name),q(g.url),q(g.note),q(g.last)].join(",");}));
-  var a=document.createElement("a");a.href=URL.createObjectURL(new Blob(["\ufeff"+rows.join("\n")],{type:"text/csv;charset=utf-8"}));
-  a.download="facebook-group-links.csv";a.click();toast("Exported "+state.groups.length+" groups.");
-});
-$("cplinks").addEventListener("click",function(){
-  if(!state.groups.length){toast("No groups to copy yet.");return;}
-  copy(state.groups.map(function(g){return g.name+" | "+g.url;}).join("\n"));toast("Copied "+state.groups.length+" links.");
-});
 $("imp").addEventListener("click",function(){$("file").click();});
 $("file").addEventListener("change",function(){
   var f=this.files[0];if(!f)return;var r=new FileReader();
   r.onload=function(){try{var s=JSON.parse(r.result);if(!s||!Array.isArray(s.groups))throw 0;state=s;save();$("text").value=state.text||"";render();toast("Backup restored.");}catch(e){toast("That backup file isn't valid.");}};
   r.readAsText(f);this.value="";
 });
-render();renderMedia();
+render();renderMedia();renderBridge();
 </script>
 </body>
 </html>
